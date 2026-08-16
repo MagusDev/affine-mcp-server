@@ -429,6 +429,29 @@ async function testIdempotentProgrammaticClose() {
   }
 }
 
+async function testStatelessMode() {
+  const server = await startHealthyServer({ AFFINE_MCP_HTTP_STATELESS: "true" });
+  try {
+    const first = await postMcp(server.baseUrl, initializeBody(1));
+    assertEqual(first.status, 200, "stateless initialize status");
+    assertEqual(first.headers.get("mcp-session-id"), null, "stateless mode must not issue a session id");
+    await first.body?.cancel();
+
+    // Nothing to resume, so a call needs no prior session and never goes stale.
+    const call = await postMcp(server.baseUrl, { jsonrpc: "2.0", id: 2, method: "tools/list" });
+    assertEqual(call.status, 200, "stateless tools/list status");
+    await call.body?.cancel();
+
+    const stream = await fetch(`${server.baseUrl}/mcp`, { headers: { accept: "text/event-stream" } });
+    assertEqual(stream.status, 405, "stateless mode has no server-to-client stream to open");
+    await stream.body?.cancel();
+
+    assert(server.logs().stderr.includes("Session mode: stateless"), "stateless mode should be logged at startup");
+  } finally {
+    await server.close();
+  }
+}
+
 async function testExpiredSessionAndStreamKeepAlive() {
   const server = await startHealthyServer({
     AFFINE_MCP_HTTP_MAX_SESSIONS: "4",
@@ -483,6 +506,7 @@ async function main() {
   await testForcedConnectionDeadline();
   await testInitializeRequestSurvivesIdleSweep();
   await testExpiredSessionAndStreamKeepAlive();
+  await testStatelessMode();
   await testIdempotentProgrammaticClose();
   console.log("HTTP runtime safety regression tests passed.");
 }

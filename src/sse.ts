@@ -103,6 +103,13 @@ export async function startHttpMcpServer(
     "AFFINE_MCP_HTTP_ALLOW_QUERY_TOKEN",
     process.env.AFFINE_MCP_HTTP_ALLOW_QUERY_TOKEN,
   );
+  // Stateless mode answers each POST on its own transport. Nothing expires, so a
+  // client whose bridge cannot reinitialize (mcp-remote gives up after two
+  // reconnects) never wedges against a session this server has forgotten.
+  const statelessMode = parseBooleanFlag(
+    "AFFINE_MCP_HTTP_STATELESS",
+    process.env.AFFINE_MCP_HTTP_STATELESS,
+  );
 
   if (config.authMode === "oauth" && allowUnauthenticated) {
     throw new Error(
@@ -363,6 +370,21 @@ export async function startHttpMcpServer(
         return;
       }
 
+      if (statelessMode) {
+        // No session to resume, so a server-to-client stream has nothing to carry.
+        if (req.method !== "POST") {
+          sendJsonRpcError(res, 405, -32000, "Method Not Allowed: this server runs in stateless mode");
+          return;
+        }
+        if (!(await parseJsonBody(req, res))) return;
+        const statelessTransport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+        res.on("close", () => void statelessTransport.close().catch(() => {}));
+        const statelessServer = await createMcpServer();
+        await statelessServer.connect(statelessTransport);
+        await statelessTransport.handleRequest(req, res, req.body);
+        return;
+      }
+
       // mcp-session-id header can technically be string | string[]; normalise.
       const sidHeader = req.headers["mcp-session-id"];
       const sessionId = Array.isArray(sidHeader) ? sidHeader[0] : sidHeader;
@@ -569,6 +591,11 @@ export async function startHttpMcpServer(
   );
   console.error(`[affine-mcp] Diagnostics: http://${displayHost}:${boundPort}/healthz`);
   console.error(`[affine-mcp] Readiness:   http://${displayHost}:${boundPort}/readyz`);
+  console.error(
+    statelessMode
+      ? `[affine-mcp] Session mode: stateless (no session ids; GET /mcp returns 405)`
+      : `[affine-mcp] Session mode: stateful`,
+  );
   console.error(
     `[affine-mcp] HTTP runtime limits: body=${runtimeConfig.bodyLimitBytes} bytes, ` +
       `sessions=${runtimeConfig.maxSessions}, idle=${runtimeConfig.sessionIdleTimeoutMs}ms, ` +
