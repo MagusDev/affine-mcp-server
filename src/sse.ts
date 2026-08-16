@@ -26,6 +26,7 @@ type TrackedSession = {
   activeRequests: number;
   kind: "streamable" | "legacy-sse";
   lastActivityAt: number;
+  openStreams: number;
   transport: HttpTransport;
 };
 
@@ -273,7 +274,29 @@ export async function startHttpMcpServer(
       activeRequests: 0,
       kind,
       lastActivityAt: Date.now(),
+      openStreams: 0,
       transport,
+    });
+  };
+
+  /**
+   * Keeps a session alive while it holds an open server-to-client stream. The
+   * stream request returns as soon as the stream is established, so without
+   * this a connected client looks idle and gets swept mid-conversation.
+   */
+  const trackOpenStream = (sessionId: string, req: Request, res: Response) => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    session.openStreams += 1;
+    session.lastActivityAt = Date.now();
+    // Without keepalive a client that vanishes without closing TCP would hold
+    // the stream — and therefore the session slot — indefinitely.
+    req.socket.setKeepAlive(true, 60_000);
+    res.on("close", () => {
+      const current = sessions.get(sessionId);
+      if (!current || current.transport !== session.transport) return;
+      current.openStreams = Math.max(0, current.openStreams - 1);
+      current.lastActivityAt = Date.now();
     });
   };
 
@@ -315,7 +338,9 @@ export async function startHttpMcpServer(
     const cutoff = Date.now() - runtimeConfig.sessionIdleTimeoutMs;
     const expired = [...sessions.entries()]
       .filter(([, session]) =>
-        session.activeRequests === 0 && session.lastActivityAt <= cutoff
+        session.activeRequests === 0
+        && session.openStreams === 0
+        && session.lastActivityAt <= cutoff
       )
       .map(([sessionId]) => sessionId);
     await Promise.all(expired.map((sessionId) => closeSession(sessionId, "idle timeout")));
@@ -348,6 +373,7 @@ export async function startHttpMcpServer(
       if (existing?.transport instanceof StreamableHTTPServerTransport) {
         transport = existing.transport;
         endSessionRequest = beginSessionRequest(sessionId!, req.method);
+        if (req.method === "GET") trackOpenStream(sessionId!, req, res);
       } else if (!sessionId && req.method === "POST") {
         // Parse body only for the initialize POST (lazy — avoids consuming the stream early).
         if (!(await parseJsonBody(req, res))) return;
@@ -387,6 +413,11 @@ export async function startHttpMcpServer(
 
         const mcpServer = await createMcpServer();
         await mcpServer.connect(transport);
+      } else if (sessionId) {
+        // The transport spec requires 404 for an unrecognized session so the
+        // client knows to re-initialize. A 400 leaves it retrying a dead id.
+        sendJsonRpcError(res, 404, -32003, "Session not found: reinitialize to continue");
+        return;
       } else {
         sendJsonRpcError(
           res,
@@ -446,6 +477,7 @@ export async function startHttpMcpServer(
       transport = new SSEServerTransport("/messages", res);
       const sessionId = transport.sessionId;
       registerSession(sessionId, transport, "legacy-sse");
+      trackOpenStream(sessionId, req, res);
 
       res.on("close", () => {
         console.error(`[affine-mcp] Legacy SSE session closed: ${sessionId}`);

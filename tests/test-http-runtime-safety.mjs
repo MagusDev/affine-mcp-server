@@ -429,6 +429,50 @@ async function testIdempotentProgrammaticClose() {
   }
 }
 
+async function testExpiredSessionAndStreamKeepAlive() {
+  const server = await startHealthyServer({
+    AFFINE_MCP_HTTP_MAX_SESSIONS: "4",
+    AFFINE_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS: "400",
+  });
+  const controller = new AbortController();
+  try {
+    const unknown = await postMcp(
+      server.baseUrl,
+      { jsonrpc: "2.0", id: 9, method: "tools/list" },
+      "11111111-2222-4333-8444-555555555555",
+    );
+    assertEqual(unknown.status, 404, "unrecognized session must report 404 so clients reinitialize");
+    assertEqual((await readJson(unknown)).error?.code, -32003, "unrecognized session error code");
+
+    const missingSession = await postMcp(server.baseUrl, { jsonrpc: "2.0", id: 10, method: "tools/list" });
+    assertEqual(missingSession.status, 400, "a request without any session id stays a 400");
+    await missingSession.body?.cancel();
+
+    const sessionId = await initializeSession(server.baseUrl, 1);
+    const stream = await fetch(`${server.baseUrl}/mcp`, {
+      headers: { accept: "text/event-stream", "mcp-session-id": sessionId },
+      signal: controller.signal,
+    });
+    assertEqual(stream.status, 200, "open server-to-client stream status");
+
+    // Longer than the idle deadline: the open stream must hold the session.
+    await delay(1_200);
+    const afterIdle = await postMcp(
+      server.baseUrl,
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      sessionId,
+    );
+    assert(
+      afterIdle.status !== 404,
+      `an open stream must keep its session alive, got ${afterIdle.status}`,
+    );
+    await afterIdle.body?.cancel();
+  } finally {
+    controller.abort();
+    await server.close();
+  }
+}
+
 async function main() {
   assert(existsSync(SERVER_PATH), "dist/index.js is missing; run npm run build first");
   await testRuntimeConfig();
@@ -438,6 +482,7 @@ async function main() {
   await testShutdownWithActiveSession();
   await testForcedConnectionDeadline();
   await testInitializeRequestSurvivesIdleSweep();
+  await testExpiredSessionAndStreamKeepAlive();
   await testIdempotentProgrammaticClose();
   console.log("HTTP runtime safety regression tests passed.");
 }

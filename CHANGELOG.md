@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Tool schemas are no longer advertised with the draft-07 JSON Schema dialect. The MCP SDK stamps `"$schema": "http://json-schema.org/draft-07/schema#"` onto every schema converted from Zod v3, which made clients that support JSON Schema 2020-12 only (Claude) reject every tool with `Tool has an invalid outputSchema`.
 - The container `HEALTHCHECK` now probes `127.0.0.1` instead of `localhost`, which can resolve to `::1` while the server listens on IPv4 only.
+- Requests carrying an unrecognized `Mcp-Session-Id` now return `404` instead of `400`, so clients reinitialize instead of retrying a session the server has already closed.
+- A session holding an open server-to-client stream is no longer treated as idle. The stream request returns once the stream is established, so a connected client was swept by the idle timeout mid-conversation and its later calls failed with no usable recovery signal.
 
 ## [3.2.1] - 2026-08-06
 

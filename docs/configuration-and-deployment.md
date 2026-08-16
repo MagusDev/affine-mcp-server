@@ -173,7 +173,10 @@ to prevent accidental resource exhaustion. Both Streamable HTTP and legacy SSE
 sessions count toward `AFFINE_MCP_HTTP_MAX_SESSIONS`. New sessions receive a
 `503` response with `Retry-After` when the limit is reached. Existing session
 traffic refreshes its idle deadline, and inactive sessions are closed after
-`AFFINE_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`.
+`AFFINE_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`. A session holding an open
+server-to-client stream is never idle, so a connected client is not closed
+mid-conversation. Requests carrying a session the server no longer knows
+receive `404`, which tells the client to reinitialize.
 
 On `SIGINT` or `SIGTERM`, the server stops accepting connections and closes MCP
 transports concurrently. If a connection prevents graceful shutdown beyond
