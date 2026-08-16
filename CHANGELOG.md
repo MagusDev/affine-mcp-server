@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Requests carrying an unrecognized `Mcp-Session-Id` now return `404` instead of `400`, so clients reinitialize instead of retrying a session the server has already closed.
+- A session holding an open server-to-client stream is no longer treated as idle. The stream request returns once the stream is established, so a connected client was swept by the idle timeout mid-conversation and its later calls failed with no usable recovery signal.
+
 ## [3.2.1] - 2026-08-06
 
 ### Security
